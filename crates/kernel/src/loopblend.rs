@@ -57,6 +57,13 @@ impl Seg {
             Seg::Arc { mid, .. } => mid,
         }
     }
+    /// The point a fraction `u` of the way along the segment.
+    fn at(&self, u: f64) -> Vec3 {
+        match *self {
+            Seg::Line { a, b } => a + (b - a) * u,
+            Seg::Arc { a, c, axis, angle, .. } => turn(a, c, axis, angle * u),
+        }
+    }
     /// Unit tangent (direction of travel) at a point of the segment.
     fn tangent(&self, p: Vec3) -> Option<Vec3> {
         match *self {
@@ -594,6 +601,34 @@ fn build(
         }
         let p = joint_point(i).ok_or_else(|| unsupported("degenerate loop joint"))?;
         if !crate::blend::extension_fits(f, p, *q, size * 1e-7) {
+            return Err(too_large("the blend is larger than the neighbouring faces"));
+        }
+    }
+    // The face rail must stay inside the face all along, not only at the joints: round a corner
+    // whose arc is not concentric with the face's other loop the gap narrows, and a rail past it
+    // leaves the face with crossing loops (a ledge round a rounded boss, set in unevenly).
+    // Checked across the face from points along each piece and along the rail between them.
+    // A run's ends lie on the face's next edges, so its rail is checked between them only.
+    let face_off_at = |i: usize, p: Vec3| frame(i, p).map(|(m, _, sb, _, _)| p + m * sb).unwrap_or(p);
+    if face_end.is_none() {
+        let mut across: Vec<(Vec3, Vec3)> = Vec::new();
+        for (i, s) in segs.iter().enumerate() {
+            let n_samples = if matches!(s, Seg::Arc { .. }) { 32 } else { 8 };
+            let ends = |j: usize| if open { None } else { pa.get(j).copied() };
+            let mut chord: Vec<Vec3> = ends(i).into_iter().collect();
+            for j in 0..n_samples {
+                let p = s.at((f64::from(j) + 0.5) / f64::from(n_samples));
+                let q = face_off_at(i, p);
+                across.push((p, q));
+                chord.push(q);
+            }
+            chord.extend(ends(nxt(i)));
+            across.extend(chord.windows(2).filter_map(|w| match w {
+                [a, b] if a.dist(*b) > tol * 10.0 => Some((*a, *b)),
+                _ => None,
+            }));
+        }
+        if !crate::blend::extensions_fit(f, &across, size * 1e-7) {
             return Err(too_large("the blend is larger than the neighbouring faces"));
         }
     }

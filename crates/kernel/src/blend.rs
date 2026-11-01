@@ -196,17 +196,17 @@ fn setback(r: f64, phi: f64, shape: Shape) -> f64 {
 /// supporting plane. Reject crossings and contact with any boundary after the old corner,
 /// including holes. Curved boundaries are sampled more finely than the clearance tolerance.
 pub(crate) fn extension_fits(face: &mt::Face, p: Vec3, q: Vec3, tol: f64) -> bool {
+    extensions_fit(face, &[(p, q)], tol)
+}
+
+/// [`extension_fits`] for many segments on one face, its boundary sampled once.
+pub(crate) fn extensions_fit(face: &mt::Face, segments: &[(Vec3, Vec3)], tol: f64) -> bool {
     use mt::{BoundedCurve, ParameterDivision1D};
     // truck requires a curve sampling tolerance of at least 1e-6. Keep the
     // boundary clearance four times larger than the chord approximation error.
     let tol = tol.max(4e-6);
-    let (Some(x), Some(n)) = ((q - p).normalized(), plane_normal(face)) else { return false };
-    let y = n.cross(x);
-    let len = p.dist(q);
-    if !len.is_finite() || len <= tol {
-        return false;
-    }
-    let mut inside = false;
+    let Some(n) = plane_normal(face) else { return false };
+    let mut boundary: Vec<Vec<Vec3>> = Vec::new();
     for edge in face.edge_iter() {
         let points = if matches!(edge.curve(), mt::Curve::Line(_)) {
             vec![edge.front().point(), edge.back().point()]
@@ -217,10 +217,25 @@ pub(crate) fn extension_fits(face: &mt::Face, p: Vec3, q: Vec3, tol: f64) -> boo
         if points.len() < 2 || points.len() > 100_000 {
             return false;
         }
+        boundary.push(points.into_iter().map(from_p3).collect());
+    }
+    segments.iter().all(|(p, q)| segment_fits(&boundary, n, *p, *q, tol))
+}
+
+/// One segment of [`extensions_fit`] against the face's sampled boundary.
+fn segment_fits(boundary: &[Vec<Vec3>], n: Vec3, p: Vec3, q: Vec3, tol: f64) -> bool {
+    let Some(x) = (q - p).normalized() else { return false };
+    let y = n.cross(x);
+    let len = p.dist(q);
+    if !len.is_finite() || len <= tol {
+        return false;
+    }
+    let mut inside = false;
+    for points in boundary {
         for pair in points.windows(2) {
             let [a, b] = pair else { return false };
-            let a = from_p3(*a) - p;
-            let b = from_p3(*b) - p;
+            let a = *a - p;
+            let b = *b - p;
             let (ax, ay, bx, by) = (a.dot(x), a.dot(y), b.dot(x), b.dot(y));
             if ![ax, ay, bx, by].iter().all(|v| v.is_finite()) {
                 return false;

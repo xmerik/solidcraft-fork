@@ -356,6 +356,58 @@ fn loop_blend_as_wide_as_its_face_consumes_it() {
 }
 
 #[test]
+fn loop_blend_must_fit_the_face_round_its_corners() {
+    // A box with r4 corners on a base with r6 corners, set in 1.936 by 1.894: the corners are
+    // 0.124 off concentric, so round them the ledge is only 6 - 4 - 0.124 = 1.876 wide. A
+    // chamfer past that left the ledge face with crossing loops and the mesh with cracks.
+    let (lx, ly) = (1.936, 1.894);
+    let base = box_solid(Vec3::ZERO, Vec3::new(100.0, 60.0, 10.0)).unwrap();
+    let base =
+        fillet(&base, &[Vec3::new(0.0, 0.0, 5.0), Vec3::new(100.0, 0.0, 5.0), Vec3::new(100.0, 60.0, 5.0), Vec3::new(0.0, 60.0, 5.0)], 6.0).unwrap();
+    let (x1, y1) = (100.0 - lx, 60.0 - ly);
+    let top = box_solid(Vec3::new(lx, ly, 10.0), Vec3::new(x1, y1, 30.0)).unwrap();
+    let top = fillet(&top, &[Vec3::new(lx, ly, 20.0), Vec3::new(x1, ly, 20.0), Vec3::new(x1, y1, 20.0), Vec3::new(lx, y1, 20.0)], 4.0).unwrap();
+    let body = boolean(&base, &top, BoolOp::Union).unwrap().unwrap();
+    let k = 4.0 * (1.0 - std::f64::consts::FRAC_1_SQRT_2);
+    let junction = [
+        Vec3::new(50.0, ly, 10.0),
+        Vec3::new(x1, 30.0, 10.0),
+        Vec3::new(50.0, y1, 10.0),
+        Vec3::new(lx, 30.0, 10.0),
+        Vec3::new(lx + k, ly + k, 10.0),
+        Vec3::new(x1 - k, ly + k, 10.0),
+        Vec3::new(x1 - k, y1 - k, 10.0),
+        Vec3::new(lx + k, y1 - k, 10.0),
+    ];
+    // Every triangle edge used once each way, vertices merged by position.
+    let watertight = |b: &Body| {
+        let m = b.display_plan_angular(0.01, crate::DISPLAY_ANGLE).unwrap().evaluate();
+        let key = |i: u32| m.positions.get(i as usize).map(|p| [(p.x + 0.0).to_bits(), (p.y + 0.0).to_bits(), (p.z + 0.0).to_bits()]);
+        let mut uses = std::collections::HashMap::new();
+        for t in &m.triangles {
+            for e in 0..3 {
+                let (a, b) = (key(t[e]), key(t[(e + 1) % 3]));
+                if a != b {
+                    *uses.entry((a, b)).or_insert(0) += 1;
+                    *uses.entry((b, a)).or_insert(0) -= 1;
+                }
+            }
+        }
+        uses.values().all(|n| *n == 0)
+    };
+    let c = chamfer(&body, &junction, 1.8).unwrap();
+    assert!(c.validity().is_empty(), "{:?}", c.validity());
+    assert!(watertight(&c));
+    // Wider than the ledge at the corners only, and wider than it on the sides too.
+    for d in [1.88, 1.9, 2.0] {
+        let e = chamfer(&body, &junction, d).unwrap_err();
+        assert!(matches!(e, KernelError::TooLarge(_)), "{d}: {e}");
+    }
+    let e = fillet(&body, &junction, 1.95).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+}
+
+#[test]
 fn fillet_consuming_a_side_face_makes_a_full_round() {
     // 14 x 6 x 10: r = 3 on the four vertical edges uses up both 6 mm end faces (#199).
     let b = box_solid(Vec3::new(14.0, 0.0, 0.0), Vec3::new(28.0, 6.0, 10.0)).unwrap();
