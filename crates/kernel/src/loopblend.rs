@@ -50,6 +50,13 @@ impl Seg {
             Seg::Arc { a, c, axis, angle, .. } => turn(a, c, axis, angle),
         }
     }
+    /// The point halfway along the segment.
+    fn mid(&self) -> Vec3 {
+        match *self {
+            Seg::Line { a, b } => (a + b) * 0.5,
+            Seg::Arc { mid, .. } => mid,
+        }
+    }
     /// Unit tangent (direction of travel) at a point of the segment.
     fn tangent(&self, p: Vec3) -> Option<Vec3> {
         match *self {
@@ -369,10 +376,7 @@ fn build(
             .iter()
             .position(|g| !std::ptr::eq(*g, *f) && g.edge_iter().any(|x| x.id() == e.id()))
             .ok_or_else(|| unsupported("an edge with one face"))?;
-        let mid = match *s {
-            Seg::Line { a, b } => (a + b) * 0.5,
-            Seg::Arc { mid, .. } => mid,
-        };
+        let mid = s.mid();
         let g = faces.get(wf).ok_or_else(|| KernelError::Failed("wall".into()))?;
         let gn = face_normal(g, mid).ok_or_else(|| unsupported("wall normal"))?;
         if gn.dot(n).abs() > 1.0 - 1e-6 {
@@ -565,10 +569,25 @@ fn build(
         }
         pb.push(p + e * (sbw / h1));
     }
+    // A blend as wide as the face uses it up: each face-side rail ends exactly at a vertex of the
+    // face's other boundary loop, whose edges become the rails (a ledge round a boss, chamfered
+    // by its width). Only a whole loop on a face with no other holes.
+    let face_end: Option<Vec<mt::Vertex>> = match (open, &f.boundaries()[..]) {
+        (false, [w0, w1]) => {
+            let far = if wi == 0 { w1 } else { w0 };
+            let far: Vec<mt::Vertex> = far.vertex_iter().collect();
+            pa.iter().map(|q| far.iter().find(|v| from_p3(v.point()).dist(*q) <= tol * 10.0).cloned()).collect()
+        }
+        _ => None,
+    };
     // Sharp joints between straight rim edges can extend beyond the old corner.
     // Equal wall slopes reach this path instead of the corner builder, and must
     // also reject an extension through the outer wall or another hole.
     for (i, q) in pa.iter().enumerate() {
+        // Ending on the face's other loop, checked rail by rail below.
+        if face_end.is_some() {
+            break;
+        }
         // Smooth arc transitions and open-run ends retain their existing checks.
         if !mitre.get(i).copied().unwrap_or(false) {
             continue;
@@ -605,7 +624,13 @@ fn build(
     if collapsed.iter().all(|x| *x) {
         return Err(too_large("the blend is larger than a corner radius"));
     }
-    let mut va: Vec<mt::Vertex> = pa.iter().map(|p| builder::vertex(p3(*p))).collect();
+    if face_end.is_some() && collapsed.iter().any(|x| *x) {
+        return Err(unsupported("a blend that uses up the face and shrinks a corner to a point"));
+    }
+    let mut va: Vec<mt::Vertex> = match &face_end {
+        Some(vs) => vs.clone(),
+        None => pa.iter().map(|p| builder::vertex(p3(*p))).collect(),
+    };
     // A collapsed piece starts and ends at one vertex.
     for i in 0..k {
         if collapsed.get(i).copied().unwrap_or(false)
@@ -726,7 +751,25 @@ fn build(
         let i = piece_of(s);
         frame(i, p).map(|(_, t, _, sbw, _)| p + t * sbw).unwrap_or(p)
     };
-    let face_rails: Vec<Option<mt::Edge>> = (0..k).map(|i| rail(&va, i, &face_off)).collect();
+    let face_rails: Vec<Option<mt::Edge>> = match face_end {
+        // Each piece's face rail is the face's other edge between the joints, where the offset
+        // rail lies (checked at the piece's middle).
+        Some(_) => (0..k)
+            .map(|i| -> Result<Option<mt::Edge>> {
+                let (Some(a), Some(b), Some(s)) = (va.get(i), va.get(nxt(i)), segs.get(i)) else {
+                    return Err(KernelError::Failed("rail".into()));
+                };
+                let want = face_off(s.mid(), s);
+                f.edge_iter()
+                    .find(|e| (e.front() == a && e.back() == b) || (e.front() == b && e.back() == a))
+                    .filter(|e| crate::blend::edge_mid(e).is_some_and(|m| m.dist(want) <= tol * 10.0))
+                    .map(|e| Some(if e.front() == a { e.clone() } else { e.inverse() }))
+                    .ok_or_else(|| unsupported("the blend uses up a face whose other edges are not where the blend ends"))
+            })
+            .collect::<Result<_>>()?,
+        None => (0..k).map(|i| rail(&va, i, &face_off)).collect(),
+    };
+    let face_used_up = face_end.is_some();
     if face_rails.iter().zip(&collapsed).any(|(r, c)| r.is_none() && !c) {
         return Err(KernelError::Failed("rail".into()));
     }
@@ -738,11 +781,7 @@ fn build(
                 let (Some(a), Some(b), Some(s), Some(wf)) = (vb.get(i), vb.get(nxt(i)), segs.get(i), walls.get(i)) else {
                     return Err(KernelError::Failed("rail".into()));
                 };
-                let mid = match *s {
-                    Seg::Line { a, b } => (a + b) * 0.5,
-                    Seg::Arc { mid, .. } => mid,
-                };
-                let want = wall_off(mid, s);
+                let want = wall_off(s.mid(), s);
                 let g = faces.get(*wf).ok_or_else(|| KernelError::Failed("wall".into()))?;
                 g.edge_iter()
                     .find(|e| (e.front() == a && e.back() == b) || (e.front() == b && e.back() == a))
@@ -861,6 +900,9 @@ fn build(
     rec.pieces(&seam_subst);
     for (gi, g) in faces.iter().enumerate() {
         let rebuilt = if gi == fi {
+            if face_used_up {
+                continue;
+            }
             rebuild(g, &face_rails)?
         } else if walls.contains(&gi) {
             if walls_used_up {

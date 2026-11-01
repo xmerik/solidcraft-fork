@@ -317,6 +317,45 @@ fn loop_fillet_as_tall_as_its_wall_consumes_it() {
 }
 
 #[test]
+fn loop_blend_as_wide_as_its_face_consumes_it() {
+    // A 100 x 60 x 40 box with a hollow frame on top, set in 2 mm all round: the junction loop
+    // blended by 2 fills the ledge right up to the box's outer edges.
+    let ring = boolean(
+        &box_solid(Vec3::new(2.0, 2.0, 40.0), Vec3::new(98.0, 58.0, 50.0)).unwrap(),
+        &box_solid(Vec3::new(6.0, 6.0, 40.0), Vec3::new(94.0, 54.0, 50.0)).unwrap(),
+        BoolOp::Cut,
+    )
+    .unwrap()
+    .unwrap();
+    let body = boolean(&box_solid(Vec3::ZERO, Vec3::new(100.0, 60.0, 40.0)).unwrap(), &ring, BoolOp::Union).unwrap().unwrap();
+    let base = 240_000.0 + 11_520.0;
+    let junction = [Vec3::new(50.0, 2.0, 40.0), Vec3::new(98.0, 30.0, 40.0), Vec3::new(50.0, 58.0, 40.0), Vec3::new(2.0, 30.0, 40.0)];
+    // The fill's cross-section (area, centroid's distance from the frame) swept round the
+    // frame's 96 x 56 outline: Pappus with mitred corners, 2(96 + 56) + 8c.
+    let filled = |(a, c): (f64, f64)| base + a * (304.0 + 8.0 * c);
+    let chamfer_section = |d: f64| (d * d / 2.0, d / 3.0);
+    let round_section = |r: f64| ((1.0 - PI / 4.0) * r * r, r * (10.0 - 3.0 * PI) / (3.0 * (4.0 - PI)));
+    let mut faces = Vec::new();
+    for d in [1.99, 2.0] {
+        let c = chamfer(&body, &junction, d).unwrap();
+        let m = measure(&c).unwrap();
+        let want = filled(chamfer_section(d));
+        assert!(rel(m.volume, want) < 1e-6, "{d}: {} vs {want}", m.volume);
+        assert!(c.validity().is_empty(), "{d}: {:?}", c.validity());
+        faces.push(m.faces);
+    }
+    // At 2 the ledge is gone: the four chamfers meet the box's sides.
+    assert_eq!(faces[1] + 1, faces[0], "{faces:?}");
+    let f = fillet(&body, &junction, 2.0).unwrap();
+    let want = filled(round_section(2.0));
+    assert!(rel(measure(&f).unwrap().volume, want) < 2e-4, "{} vs {want}", measure(&f).unwrap().volume);
+    assert!(f.validity().is_empty(), "{:?}", f.validity());
+    // Wider than the ledge: still refused.
+    let e = chamfer(&body, &junction, 2.1).unwrap_err();
+    assert!(matches!(e, KernelError::TooLarge(_)), "{e}");
+}
+
+#[test]
 fn fillet_consuming_a_side_face_makes_a_full_round() {
     // 14 x 6 x 10: r = 3 on the four vertical edges uses up both 6 mm end faces (#199).
     let b = box_solid(Vec3::new(14.0, 0.0, 0.0), Vec3::new(28.0, 6.0, 10.0)).unwrap();
